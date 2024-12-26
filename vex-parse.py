@@ -1,6 +1,3 @@
-# Copyright (c) 2024 Huzaifa Sidhpurwala <huzaifas@redhat.com>
-# License: GPLv3+
-
 #!/usr/bin/env python3
 
 import json
@@ -65,6 +62,80 @@ class VexParser:
 
         return extract_dir
 
+    def calculate_cvss2_score(self, vector: str) -> float:
+        """Calculate CVSS v2 base score from vector string."""
+        if not vector or not vector.startswith('AV:'):
+            return 0.0
+
+        # Parse vector string into components
+        components = dict(item.split(':') for item in vector.split('/'))
+        
+        # Impact metrics
+        conf_impact = {'N': 0.0, 'P': 0.275, 'C': 0.660}[components.get('C', 'N')]
+        integ_impact = {'N': 0.0, 'P': 0.275, 'C': 0.660}[components.get('I', 'N')]
+        avail_impact = {'N': 0.0, 'P': 0.275, 'C': 0.660}[components.get('A', 'N')]
+        
+        # Exploitability metrics
+        access_vector = {'L': 0.395, 'A': 0.646, 'N': 1.0}[components.get('AV', 'L')]
+        access_complexity = {'H': 0.35, 'M': 0.61, 'L': 0.71}[components.get('AC', 'L')]
+        authentication = {'M': 0.45, 'S': 0.56, 'N': 0.704}[components.get('Au', 'N')]
+        
+        # Calculate impact and exploitability
+        impact = 10.41 * (1 - (1 - conf_impact) * (1 - integ_impact) * (1 - avail_impact))
+        exploitability = 20 * access_vector * access_complexity * authentication
+        
+        # Calculate base score
+        if impact == 0:
+            base_score = 0
+        else:
+            base_score = round(((0.6 * impact) + (0.4 * exploitability) - 1.5) * 1.176, 1)
+        
+        return base_score
+
+    def calculate_cvss3_score(self, vector: str) -> float:
+        """Calculate CVSS v3 base score from vector string."""
+        if not vector or not vector.startswith('CVSS:3'):
+            return 0.0
+
+        # Parse vector string into components
+        components = dict(item.split(':') for item in vector.split('/'))
+        
+        # Impact metrics
+        conf_impact = {'N': 0, 'L': 0.22, 'H': 0.56}[components.get('C', 'N')]
+        integ_impact = {'N': 0, 'L': 0.22, 'H': 0.56}[components.get('I', 'N')]
+        avail_impact = {'N': 0, 'L': 0.22, 'H': 0.56}[components.get('A', 'N')]
+        
+        # Exploitability metrics
+        attack_vector = {'N': 0.85, 'A': 0.62, 'L': 0.55, 'P': 0.2}[components.get('AV', 'N')]
+        attack_complexity = {'L': 0.77, 'H': 0.44}[components.get('AC', 'L')]
+        privileges_required = {
+            'N': 0.85,
+            'L': 0.62 if components.get('S', 'U') == 'C' else 0.68,
+            'H': 0.27 if components.get('S', 'U') == 'C' else 0.50
+        }[components.get('PR', 'N')]
+        user_interaction = {'N': 0.85, 'R': 0.62}[components.get('UI', 'N')]
+        
+        # Calculate base metrics
+        exploitability = 8.22 * attack_vector * attack_complexity * privileges_required * user_interaction
+        
+        impact_sub_score = 1 - ((1 - conf_impact) * (1 - integ_impact) * (1 - avail_impact))
+        
+        # Determine scope and calculate impact
+        if components.get('S', 'U') == 'C':
+            impact = 7.52 * (impact_sub_score - 0.029) - 3.25 * pow(impact_sub_score - 0.02, 15)
+        else:
+            impact = 6.42 * impact_sub_score
+            
+        if impact <= 0:
+            return 0
+            
+        if components.get('S', 'U') == 'C':
+            base_score = min(1.08 * (exploitability + impact), 10)
+        else:
+            base_score = min(exploitability + impact, 10)
+            
+        return round(base_score, 1)
+
     def process_vex_file(self, file_path: str) -> Dict[str, Any]:
         """Process a single VEX file and return structured data."""
         with open(file_path, 'r') as f:
@@ -73,11 +144,20 @@ class VexParser:
         doc = data.get('document', {})
         vulnerabilities = data.get('vulnerabilities', [])
         
+        # Split title into component and description
+        title = doc.get('title', '') or ''
+        component, *description_parts = title.split(':', 1)
+        description = description_parts[0].strip() if description_parts else ''
+        
         processed = {
-            'title': doc.get('title', ''),
-            'release_date': doc.get('tracking', {}).get('current_release_date', ''),
-            'severity': doc.get('aggregate_severity', {}).get('text', ''),
-            'cve': '',
+            'affected_component': component.strip(),
+            'Title': description,
+            'release_date': doc.get('tracking', {}).get('current_release_date', '') or None,
+            'severity': doc.get('aggregate_severity', {}).get('text', '') or None,
+            'cve': '' or None,
+            'scores': [],
+            'cvss_v2': '' or None,
+            'cvss_v3': '' or None,
             'vulnerability_details': []
         }
         
@@ -86,7 +166,26 @@ class VexParser:
             if cve := vuln.get('cve'):
                 processed['cve'] = cve
             
-            # Create vulnerability details regardless of CVE presence
+            # Extract scores and CVSS vectors
+            scores = vuln.get('scores', [])
+            processed['scores'].extend(scores)
+            
+            # Extract CVSS v2 and v3 vector strings
+            for score in scores:
+                if score.get('products'):
+                    if score.get('cvss_v2'):
+                        vector_string = score.get('cvss_v2', {}).get('vectorString', '')
+                        if vector_string:
+                            cvss_score = self.calculate_cvss2_score(vector_string)
+                            processed['cvss_v2'] = f"{cvss_score}/{vector_string}"
+                    if score.get('cvss_v3'):
+                        vector_string = score.get('cvss_v3', {}).get('vectorString', '')
+                        if vector_string:
+                            cvss_score = self.calculate_cvss3_score(vector_string)
+                            processed['cvss_v3'] = f"{cvss_score}/{vector_string}"
+                    break
+            
+            # Create vulnerability details without scores
             vuln_data = {
                 'product_status': {
                     'fixed': vuln.get('product_status', {}).get('fixed', []),
@@ -96,24 +195,27 @@ class VexParser:
                 },
                 'threats': [
                     {
-                        'category': threat.get('category', ''),
-                        'details': threat.get('details', ''),
-                        'date': threat.get('date', '')
+                        'category': threat.get('category', '') or None,
+                        'details': threat.get('details', '') or None,
+                        'date': threat.get('date', '') or None
                     }
                     for threat in vuln.get('threats', [])
                 ],
-                'scores': vuln.get('scores', []),
                 'remediations': [
                     {
-                        'category': rem.get('category', ''),
-                        'details': rem.get('details', ''),
-                        'date': rem.get('date', '')
+                        'category': rem.get('category', '') or None,
+                        'details': rem.get('details', '') or None,
+                        'date': rem.get('date', '') or None
                     }
                     for rem in vuln.get('remediations', [])
                 ]
             }
             processed['vulnerability_details'].append(vuln_data)
             
+        # Replace empty scores list with "None"
+        #if not processed['scores']:
+        #    processed['scores'] = "None"
+        
         return processed
 
     def create_dataset(self) -> None:
@@ -130,6 +232,8 @@ class VexParser:
                     file_path = os.path.join(root, file)
                     try:
                         processed = self.process_vex_file(file_path)
+                        # Remove the scores field before adding to dataset
+                        processed.pop('scores', None)
                         processed_data.append(processed)
                     except Exception as e:
                         print(f"Error processing {file}: {str(e)}")
