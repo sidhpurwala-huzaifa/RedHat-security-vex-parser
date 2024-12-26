@@ -73,6 +73,7 @@ class VexParser:
         processed = {
             'title': doc.get('title', ''),
             'release_date': doc.get('tracking', {}).get('current_release_date', ''),
+            'severity': doc.get('aggregate_severity', {}).get('text', ''),
             'vulnerabilities': []
         }
         
@@ -80,7 +81,7 @@ class VexParser:
             vuln_data = {
                 'cve': vuln.get('cve', ''),
                 'product_status': vuln.get('product_status', {}),
-                'threats': vuln.get('threats', [])
+                'threats': vuln.get('threats', []),
             }
             processed['vulnerabilities'].append(vuln_data)
             
