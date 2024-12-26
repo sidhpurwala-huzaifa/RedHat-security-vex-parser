@@ -1,3 +1,6 @@
+# Copyright (c) 2024 Huzaifa Sidhpurwala <huzaifas@redhat.com>
+# License: GPLv3+
+
 #!/usr/bin/env python3
 
 import json
