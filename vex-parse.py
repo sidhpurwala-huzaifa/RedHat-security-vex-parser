@@ -74,16 +74,42 @@ class VexParser:
             'title': doc.get('title', ''),
             'release_date': doc.get('tracking', {}).get('current_release_date', ''),
             'severity': doc.get('aggregate_severity', {}).get('text', ''),
-            'vulnerabilities': []
+            'cve': '',
+            'vulnerability_details': []
         }
         
         for vuln in vulnerabilities:
+            # Store CVE if found
+            if cve := vuln.get('cve'):
+                processed['cve'] = cve
+            
+            # Create vulnerability details regardless of CVE presence
             vuln_data = {
-                'cve': vuln.get('cve', ''),
-                'product_status': vuln.get('product_status', {}),
-                'threats': vuln.get('threats', []),
+                'product_status': {
+                    'fixed': vuln.get('product_status', {}).get('fixed', []),
+                    'known_affected': vuln.get('product_status', {}).get('known_affected', []),
+                    'known_not_affected': vuln.get('product_status', {}).get('known_not_affected', []),
+                    'under_investigation': vuln.get('product_status', {}).get('under_investigation', [])
+                },
+                'threats': [
+                    {
+                        'category': threat.get('category', ''),
+                        'details': threat.get('details', ''),
+                        'date': threat.get('date', '')
+                    }
+                    for threat in vuln.get('threats', [])
+                ],
+                'scores': vuln.get('scores', []),
+                'remediations': [
+                    {
+                        'category': rem.get('category', ''),
+                        'details': rem.get('details', ''),
+                        'date': rem.get('date', '')
+                    }
+                    for rem in vuln.get('remediations', [])
+                ]
             }
-            processed['vulnerabilities'].append(vuln_data)
+            processed['vulnerability_details'].append(vuln_data)
             
         return processed
 
