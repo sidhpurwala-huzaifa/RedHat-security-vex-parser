@@ -1,9 +1,28 @@
+# Copyright (c) 2024 Huzaifa Sidhpurwala <huzaifas@redhat.com>
+# License: GPLv3+
+#
+# vex-parse.py  
+#
+# This script downloads the latest VEX archive file, extracts it, and processes each VEX file to create a HuggingFace dataset.
+# It includes functions to download the latest VEX archive, extract the archive, process each VEX file, and create a dataset.
+# The processed data is stored in a JSON format and can be used for further analysis or machine learning tasks.
+#
+# Usage: python vex-parse.py
+#
+# Dependencies:
+# - requests
+# - beautifulsoup4
+# - tarfile
+# - zstandard
+# - datasets
+# - tqdm
+
 #!/usr/bin/env python3
 
 import json
 import sys
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 import requests
 import os
 from bs4 import BeautifulSoup
@@ -136,6 +155,41 @@ class VexParser:
             
         return round(base_score, 1)
 
+    def extract_product_status(self, product_status: Dict) -> Dict[str, List[str]]:
+        """Extract product status information."""
+        vendor_fixes = []
+        if 'vendor_fix' in product_status:
+            for fix in product_status['vendor_fix']:
+                if 'url' in fix:
+                    url = fix['url']
+                    # Extract the last bits of the URL that match the pattern "RHSA-<number>:<number>"
+                    if "RHSA-" in url:
+                        parts = url.split("RHSA-")
+                        if len(parts) > 1:
+                            vendor_fixes.append("RHSA-" + parts[-1].split(':')[0])  # Get the part before the colon
+
+        return {
+            'fixed_products': product_status.get('fixed', []),
+            'known_affected_products': product_status.get('known_affected', []),
+            'known_not_affected_products': product_status.get('known_not_affected', []),
+            'under_investigation_products': product_status.get('under_investigation', []),
+            'vendor_fix': vendor_fixes  # New field for vendor fixes
+        }
+
+    def extract_threats_or_remediations(self, items: List[Dict], is_threat: bool) -> Tuple[List[str], List[str], List[str]]:
+        """Extract threats or remediations information."""
+        categories, details, dates = [], [], []
+        for item in items:
+            if is_threat:
+                categories.append(item.get('category', '') or None)
+                details.append(item.get('details', '') or None)
+                dates.append(item.get('date', '') or None)
+            else:
+                categories.append(item.get('category', '') or None)
+                details.append(item.get('details', '') or None)
+                dates.append(item.get('date', '') or None)
+        return categories, details, dates
+
     def process_vex_file(self, file_path: str) -> Dict[str, Any]:
         """Process a single VEX file and return structured data."""
         with open(file_path, 'r') as f:
@@ -150,18 +204,39 @@ class VexParser:
         description = description_parts[0].strip() if description_parts else ''
         
         processed = {
-            'affected_component': component.strip(),
-            'Title': description,
-            'release_date': doc.get('tracking', {}).get('current_release_date', '') or None,
-            'severity': doc.get('aggregate_severity', {}).get('text', '') or None,
             'cve': '' or None,
+            'affected_component': component.strip(),
+            'summary': description,
+            'severity': doc.get('aggregate_severity', {}).get('text', '') or None,
             'scores': [],
             'cvss_v2': '' or None,
             'cvss_v3': '' or None,
-            'vulnerability_details': []
+            'description': None,
+            'statement': None,
+            'release_date': doc.get('tracking', {}).get('current_release_date', '') or None,
+            # New fields for product status
+            'fixed_products': [],
+            'known_affected_products': [],
+            'known_not_affected_products': [],
+            'under_investigation_products': [],
+            # New fields for threats and remediations
+            'threat_categories': [],
+            'threat_details': [],
+            'threat_dates': [],
+            'remediation_categories': [],
+            'remediation_details': [],
+            'remediation_dates': []
         }
-        
+
         for vuln in vulnerabilities:
+            # Extract notes by category
+            for note in vuln.get('notes', []):
+                category = note.get('category')
+                if category == 'description':
+                    processed['description'] = note.get('text')
+                elif category == 'other':
+                    processed['statement'] = note.get('text')
+                    
             # Store CVE if found
             if cve := vuln.get('cve'):
                 processed['cve'] = cve
@@ -181,40 +256,63 @@ class VexParser:
                     if score.get('cvss_v3'):
                         vector_string = score.get('cvss_v3', {}).get('vectorString', '')
                         if vector_string:
+                            # Remove "CVSS:3.1/" from the vector string
+                            #vector_string = vector_string.replace("CVSS:3.1/", "")
                             cvss_score = self.calculate_cvss3_score(vector_string)
+                            vector_string = vector_string.replace("CVSS:3.1/", "")
                             processed['cvss_v3'] = f"{cvss_score}/{vector_string}"
                     break
             
-            # Create vulnerability details without scores
-            vuln_data = {
-                'product_status': {
-                    'fixed': vuln.get('product_status', {}).get('fixed', []),
-                    'known_affected': vuln.get('product_status', {}).get('known_affected', []),
-                    'known_not_affected': vuln.get('product_status', {}).get('known_not_affected', []),
-                    'under_investigation': vuln.get('product_status', {}).get('under_investigation', [])
-                },
-                'threats': [
-                    {
-                        'category': threat.get('category', '') or None,
-                        'details': threat.get('details', '') or None,
-                        'date': threat.get('date', '') or None
-                    }
-                    for threat in vuln.get('threats', [])
-                ],
-                'remediations': [
-                    {
-                        'category': rem.get('category', '') or None,
-                        'details': rem.get('details', '') or None,
-                        'date': rem.get('date', '') or None
-                    }
-                    for rem in vuln.get('remediations', [])
-                ]
-            }
-            processed['vulnerability_details'].append(vuln_data)
+            # Extract product status
+            product_status = self.extract_product_status(vuln.get('product_status', {}))
+            product_status.pop('vendor_fix', None)  # Remove the 'vendor_fix' field
+            processed.update(product_status)
+
+            # Extract threats
+            threat_categories, threat_details, threat_dates = self.extract_threats_or_remediations(vuln.get('threats', []), True)
+            processed['threat_categories'].extend(threat_categories)
+            processed['threat_details'].extend(threat_details)
+            processed['threat_dates'].extend(threat_dates)
+
+            # Extract remediations
+            remediation_categories, remediation_details, remediation_dates = self.extract_threats_or_remediations(vuln.get('remediations', []), False)
+            processed['remediation_categories'].extend(remediation_categories)
+            processed['remediation_details'].extend(remediation_details)
+            processed['remediation_dates'].extend(remediation_dates)
             
         # Replace empty scores list with "None"
         #if not processed['scores']:
         #    processed['scores'] = "None"
+        
+        # After collecting all data, remove duplicates from list fields
+        processed['fixed_products'] = list(dict.fromkeys(processed['fixed_products']))
+        processed['known_affected_products'] = list(dict.fromkeys(processed['known_affected_products']))
+        processed['known_not_affected_products'] = list(dict.fromkeys(processed['known_not_affected_products']))
+        processed['under_investigation_products'] = list(dict.fromkeys(processed['under_investigation_products']))
+        
+        # Remove duplicates from threat information while preserving order
+        unique_threats = {}
+        for cat, detail, date in zip(processed['threat_categories'], 
+                                    processed['threat_details'], 
+                                    processed['threat_dates']):
+            unique_threats[(cat, detail, date)] = None
+        processed['threat_categories'], processed['threat_details'], processed['threat_dates'] = zip(*unique_threats.keys()) if unique_threats else ([], [], [])
+        
+        # Remove duplicates from remediation information while preserving order
+        unique_remediations = {}
+        for cat, detail, date in zip(processed['remediation_categories'], 
+                                    processed['remediation_details'], 
+                                    processed['remediation_dates']):
+            unique_remediations[(cat, detail, date)] = None
+        processed['remediation_categories'], processed['remediation_details'], processed['remediation_dates'] = zip(*unique_remediations.keys()) if unique_remediations else ([], [], [])
+        
+        # Convert tuples back to lists for JSON serialization
+        processed['threat_categories'] = list(processed['threat_categories'])
+        processed['threat_details'] = list(processed['threat_details'])
+        processed['threat_dates'] = list(processed['threat_dates'])
+        processed['remediation_categories'] = list(processed['remediation_categories'])
+        processed['remediation_details'] = list(processed['remediation_details'])
+        processed['remediation_dates'] = list(processed['remediation_dates'])
         
         return processed
 
@@ -238,11 +336,14 @@ class VexParser:
                     except Exception as e:
                         print(f"Error processing {file}: {str(e)}")
 
+        # Sort the processed data by CVE year in descending order
+        processed_data.sort(key=lambda x: int(x['cve'].split('-')[1]) if x['cve'] and x['cve'].startswith('CVE-') else 0, 
+                          reverse=True)
+
         # Create HuggingFace dataset
         dataset = datasets.Dataset.from_list(processed_data)
         
         # Push to HuggingFace Hub
-        # Note: Requires huggingface-cli login first
         dataset.push_to_hub("RedHat-security-VeX")
 
 def main():
