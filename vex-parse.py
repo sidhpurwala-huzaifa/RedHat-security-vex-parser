@@ -205,6 +205,7 @@ class VexParser:
         
         processed = {
             'cve': '' or None,
+            'cwe': '' or None,
             'affected_component': component.strip(),
             'summary': description,
             'severity': doc.get('aggregate_severity', {}).get('text', '') or None,
@@ -237,6 +238,10 @@ class VexParser:
                 elif category == 'other':
                     processed['statement'] = note.get('text')
                     
+            # Extract CWE if found
+            if cwe_data := vuln.get('cwe'):
+                processed['cwe'] = cwe_data.get('id')
+            
             # Store CVE if found
             if cve := vuln.get('cve'):
                 processed['cve'] = cve
