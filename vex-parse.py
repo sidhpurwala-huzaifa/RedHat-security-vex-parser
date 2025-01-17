@@ -214,7 +214,8 @@ class VexParser:
             'cvss_v3': '' or None,
             'description': None,
             'statement': None,
-            'release_date': doc.get('tracking', {}).get('current_release_date', '') or None,
+            'discovery_date': None,
+            'release_date': doc.get('tracking', {}).get('initial_release_date') or None,
             # New fields for product status
             'fixed_products': [],
             'known_affected_products': [],
@@ -230,6 +231,10 @@ class VexParser:
         }
 
         for vuln in vulnerabilities:
+            # Extract discovery date if found
+            if discovery := vuln.get('discovery_date'):
+                processed['discovery_date'] = discovery
+            
             # Extract notes by category
             for note in vuln.get('notes', []):
                 category = note.get('category')
